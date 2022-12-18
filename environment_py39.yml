@@ -1,0 +1,11 @@
+name: climatedata_py39
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - lxml
+  - numpy
+  - pandas
+  - pytz
+  - setuptools
+  - rich
