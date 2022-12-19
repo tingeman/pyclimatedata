@@ -41,5 +41,8 @@ _ReSharper*/
 # Python egg metadata, regenerated from source files by setuptools.
 /*.egg-info
 
+# Jupyter notebook checkpoints
+.ipynb_checkpoints*
+
 #project specific
 
