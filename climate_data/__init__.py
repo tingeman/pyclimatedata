@@ -237,6 +237,13 @@ class DataRepository():
                 filelist.extend([f.name for f in dp.glob(pattern)])
         return filelist
 
+    def exists(self, pattern):
+        """Check if filename or pattern exists in repository"""
+        if len(self.glob(pattern))>0:
+            return True
+        else:
+            return False
+
     def get_filepath(self, filename):
         """Return the path that contains the filename passed."""
         
@@ -1287,7 +1294,11 @@ class ClimateDataSetBase:
         # Data threshold for annual FDD/TDD calculation
         self.dd_data_threshold = 340  # measurements per year
 
-        self.station_name = ""
+        try:
+            _ = self.station_name
+        except:
+            self.station_name = ""
+
         self.raw_data = None
         self.converted = None
         self.datasets = {}
@@ -1947,47 +1958,70 @@ class DMITypeLongDaily(ClimateDataSetBase):
 
 
 class DMITypeLongMonthly(ClimateDataSetBase):
-    type = 'DMILongMonthly'
-    description = 'Data format combined long monthly climate dataseries from DMI'
+    type = 'DMITypeLongMonthly'
+    description = 'Data format combined long air temperature dataseries from DMI'
 
-    month_translation = {'jan': 1,
-                            'feb': 2,
-                            'mar': 3,
-                            'apr': 4,
-                            'may': 5,
-                            'jun': 6,
-                            'jul': 7,
-                            'aug': 8,
-                            'sep': 9,
-                            'oct': 10,
-                            'nov': 11,
-                            'dec': 12}
+    def __init__(self, station_name='99999', **kwargs):
+        # raise NotImplementedError()
 
-    months = list(month_translation.keys())
-    month_nos = list(month_translation.values())
+        # Each station consists of three files,
+        # _112  Highest temperature
+        # _122  Lowest temperature
+        # _601  Accuumulated precipitation
 
-    elem_no_translation = {101: 'AT',
-                            111: 'ATmaxAvg', 
-                            112: 'ATmax', 
-                            121: 'ATminAvg', 
-                            122: 'ATmin', 
-                            401: 'AP', 
-                            601: 'PRE',
-                            602: 'PRE_max_24h', 
-                            701: 'days with snow', 
-                            801: 'cloud cover'}
-                            
-    # From the dmi report:
-    # 101 Average air temperature                    average     °C
-    # 111 Average of daily maximum air temperature   average     °C
-    # 112 Highest air temperature                    max         °C
-    # 121 Average of daily minimum air temperature   average     °C
-    # 122 Lowest air temperature                     min         °C
-    # 401 Atmospheric pressure (msl)                 obs/average hPa
-    # 601 Accumulated precipitation                  sum         mm
-    # 602 Highest 24-hour precipitation              max         mm
-    # 701 Number of days with snow cover (> 50 % covered) sum    days
-    # 801 Average cloud cover                        average     %
+        # read them, and instantiate each series as ClimateSeriesBase.
+
+        # station names can be like 99999, 34221, 04221 or 4221
+        # parse old and new station names
+        if len(station_name) == 5 and station_name[0] == '0':
+            self.station_name = station_name[1:]
+        else:
+            self.station_name = station_name
+
+        super().__init__('gr_monthly_all_1784_2020.csv', filepath=DMI_PATH_LONG_FORMAT, encoding=None)
+
+
+    def read_data(self, file, encoding=None):
+        # Read time series and process date columns
+
+        month_translation = {'jan': 1,
+                             'feb': 2,
+                             'mar': 3,
+                             'apr': 4,
+                             'may': 5,
+                             'jun': 6,
+                             'jul': 7,
+                             'aug': 8,
+                             'sep': 9,
+                             'oct': 10,
+                             'nov': 11,
+                             'dec': 12}
+
+        months = list(month_translation.keys())
+        month_nos = list(month_translation.values())
+
+        elem_no_translation = {101: 'AT',
+                               111: 'ATmaxAvg', 
+                               112: 'ATmax', 
+                               121: 'ATminAvg', 
+                               122: 'ATmin', 
+                               401: 'AP', 
+                               601: 'PRE',
+                               602: 'PRE_max_24h', 
+                               701: 'days with snow', 
+                               801: 'cloud cover'}
+                               
+        # From the dmi report:
+        # 101 Average air temperature                    average     °C
+        # 111 Average of daily maximum air temperature   average     °C
+        # 112 Highest air temperature                    max         °C
+        # 121 Average of daily minimum air temperature   average     °C
+        # 122 Lowest air temperature                     min         °C
+        # 401 Atmospheric pressure (msl)                 obs/average hPa
+        # 601 Accumulated precipitation                  sum         mm
+        # 602 Highest 24-hour precipitation              max         mm
+        # 701 Number of days with snow cover (> 50 % covered) sum    days
+        # 801 Average cloud cover                        average     %
 
         raw_data = pd.read_csv(file, sep=';', na_values=['null', '-999,9'], decimal=',', encoding=encoding, comment='#')
 
@@ -2004,16 +2038,14 @@ class DMITypeLongMonthly(ClimateDataSetBase):
         # Index the dataframe based on datetimes
         df.index = pd.DatetimeIndex(dates)
         df['weekday'] = df.index.weekday  # added to be used for calculating statistics
-
+        df = df.sort_index(ascending=True)
         # adjust column names
         #  df.rename(columns={'value': 'AT'}, inplace=True)
 
-        self.raw_data = df
+        self.raw_data = df.sort_index(ascending=True)
 
         df_station = df[df['stat_no']==int(self.station_name)]
         
-
-
         if not df_station[df_station['parameter']=='AT']['value'].isna().all():
             self.datasets['AT'] = AirTemp(AT=df_station[df_station['parameter']=='AT']['value'])
 
@@ -2242,7 +2274,7 @@ CLIMATE_FILE_CLASSES = {'DMI1': DMIType1,
                         'DMI3': DMIType3,
                         'DMIX': DMITypeX,
                         'DMILongDaily': DMITypeLongDaily,
-                        'DMILong': DMITypeLong,
+                        'DMILongMonthly': DMITypeLongMonthly,
                         'NESDIS': NESDISType,
                         'US_YDE': CustomType1,}
 
