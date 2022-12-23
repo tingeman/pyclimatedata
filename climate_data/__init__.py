@@ -1,5 +1,7 @@
 # Python v 3.7
 
+from typing import Union, Any
+
 try:
     # Import enhanced debugger, if available
     import ipdb as pdb
@@ -70,10 +72,38 @@ from matplotlib.colors import ListedColormap
 # =====================================================================================
 # EXAMPLES OF USAGE 
 # =====================================================================================
+#
+# see __main__ section at end of module
+#
+# =====================================================================================
+# TODOs
+# =====================================================================================
+#
+# - Implement unit checking and conversion using the pint module
+#       __init__ methods should take a 'unit' parameter, and automatically convert 
+#       from specified to class defined default unit (specified for each class)
+# - Implement method in ClimateDataSetBase to align timeseries of all datasets
+#       (from first to last date valid for all series)
+#       (or expand with NaNs to largest date span in dataset...?) 
+# - May need utility method in ClimateTimeSeriesBase to interpolate/gapfill
+#       use instance variable to specify gapfill method: interpolate, fill, None (do nothing)
+# - 'fill' needs arguments, maybe gapfill_args = [xxx,xxx,xxx], gapfill_kwargs = {xxx:yyy,...}
+# - Should we have a gapfill_from(other) method?
+#       or should it be up to user to handle this on case by case basis?
+# - Should we have a ClimateDataCombined class, which is instantiated when 
+#       two time series are merged?
+#       It could keep track of which rows comes from which series
+#       and delegate certain tasks to the original source instance
 
 # see also __main__ section at end of module
 
-# #import climate_data as cdata
+# =====================================================================================
+# More EXAMPLES OF USAGE 
+# =====================================================================================
+#
+# THE EXAMPLES BELOW ARE NOT GUARANTEED TO WORK 
+#
+# import climate_data as cdata
 # from matplotlib import pyplot as plt
 #
 # # load data using the load_climate_data function (takes filename as input)
@@ -469,6 +499,8 @@ def load_climate_data(file_or_filename, repository=None):
 
 class ClimateTimeSeriesBase():
     identifier = None
+    unit = None
+    daily_aggregator = None    # could be one of 'mean', 'sum', 'max' (see Pandas GroupBy computation methods)
     days = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
     months = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
 
@@ -483,14 +515,15 @@ class ClimateTimeSeriesBase():
             npar = 0
 
         self.raw_data = None
+        self.daily_data = None
         
         if npar >= 1:
             if len(args) == npar:
                 if npar >= 2:
-                    args_list = [a for a in args if a is not None]
+                    args_list = [pd.to_numeric(a) for a in args if a is not None]
                     name_list = [self.identifier[k] for k in range(len(args)) if args[k] is not None]
                 else:
-                    args_list = [a for a in args if a is not None]
+                    args_list = [pd.to_numeric(a) for a in args if a is not None]
                     name_list = [self.identifier for k in range(len(args)) if args[k] is not None]
             elif len(args) == 0:
                 args_list = []
@@ -498,28 +531,81 @@ class ClimateTimeSeriesBase():
                 if npar >= 2:
                     for k in self.identifier:
                         if (k in kwargs) and (kwargs[k] is not None):
-                            args_list.append(kwargs[k])
+                            args_list.append(pd.to_numeric(kwargs[k]))
                             name_list.append(k)
                 else:
                     if kwargs[self.identifier] is not None:
-                        args_list = [kwargs[self.identifier]]
+                        args_list = [pd.to_numeric(kwargs[self.identifier])]
                         name_list = [self.identifier]
 
             if len(name_list) > 0:
                 self.raw_data = pd.concat(args_list, axis=1)
                 self.raw_data.columns = name_list
 
-    def merge_with(self, other, in_place=True):
-        if isinstance(other, type(self)):
-            if in_place:
+
+    def aggregate_daily(self):
+        """Generic daily aggregator method. Maybe used to aggregate raw data into
+        daily values using a daily mean, sum or max value, depending on the value
+        of self.daily_aggregator.
+        
+        Method may be overwritten by child classes, to implement special functionality.
+        """
+
+        def _aggregate(grouped, parameter, aggregator):
+            # calculate aggregated value and count number of entries on each date
+            agg_values = getattr(grouped[parameter], aggregator)()
+            agg_count = grouped[parameter].count()
+            agg_count.name = 'count_'+agg_count.name
+            return agg_values, agg_count
+
+        if self.daily_aggregator is not None:   
+            grouped = self.raw_data.groupby(self.raw_data.index.date)
+            dataseries = []
+            countseries =  []
+
+            if isinstance(self.identifier, str):
+                if self.daily_aggregator.lower() != 'none':
+                    # calculate aggregated value and count number of entries on each date
+                    values, counts = _aggregate(grouped, self.identifier, self.daily_aggregator)
+                    dataseries.append(values)
+                    countseries.append(counts)
+            else:
+                for idx,par_id in enumerate(self.identifier):
+                    if (self.daily_aggregator[idx] is not None) and (self.daily_aggregator[idx].lower() != 'none'):
+                        # calculate aggregated value and count number of entries on each date
+                        values, counts = _aggregate(grouped, par_id, self.daily_aggregator[idx])
+                        dataseries.append(values)
+                        countseries.append(counts)
+
+            if len(dataseries) >= 0:
+                df_agg = pd.concat([*dataseries, *countseries], axis=1)
+                self.daily_data = df_agg
+            else:
+                self.daily_data = None
+        else:
+            self.daily_data = None
+
+        if self.daily_data is not None:
+            self.daily_data = self.daily_data.asfreq('D')  # Make sure the timeseries is continuous
+
+            if not isinstance(self.identifier, str):
+                idx = [k for k in self.identifier if k in self.daily_data]
+            else:
+                idx = self.identifier
+            self.daily_data = self.daily_data[self.daily_data[idx].first_valid_index():self.daily_data[idx].last_valid_index()]
+
+    def merge_with(self, other, inplace=True):
+        if (isinstance(other, type(self))) or (other is None):
+            if inplace:
                 new_cd = self
             else:
                 new_cd = copy.deepcopy(self)
         else:
             raise NotCompatibleError('Unable to merge instances of {0} with {1}'.format(type(self), type(other)))       
 
-        new_cd.raw_data = self.raw_data.combine_first(other.raw_data)
-        new_cd.raw_data.sort_index(inplace=True)
+        if other is not None:
+            new_cd.raw_data = self.raw_data.combine_first(other.raw_data)
+            new_cd.raw_data.sort_index(inplace=True)
 
         new_cd.filename = None
         return new_cd
@@ -528,7 +614,14 @@ class ClimateTimeSeriesBase():
         """Scale and bias correct this timeseries to other timeseries.
         return new combined timeseries.
         """
-        raise NotImplementedError()
+        if isinstance(other, type(self)) or (other is None):
+            new = copy.deepcopy(self)
+        else:
+            raise ValueError('Unable to scale instances of {0} to {1}'.format(type(self), type(other)))
+
+        print('{0}: No scaling/bias correction implemented, retaining data without modification.'.format(self.identifier))
+
+        return new
 
     def get_ymd(self, df):
         # Return dataframe with year, month and weekday columns, which may be later used for calculating annual averages
@@ -560,9 +653,32 @@ class ClimateTimeSeriesBase():
         stats = pd.concat([nday_stats, month_stats, weekday_stats], axis=1)
         return stats.loc[stats.index.isin(yearlist)]
 
+    def limit(self, lim:list[Union[str,dt.datetime,dt.date, None]]):
+        self.raw_data = self._limit(lim, 'raw_data')
+        self.daily_data = self._limit(lim, 'daily_data')
+
+
+    def _limit(self, lim:list[Union[str,dt.datetime,dt.date, None]], dataset:str='raw_data'):
+        if len(lim) != 2:
+            raise ValueError('lim must be a two element iterable.')
+        
+        ds = getattr(self, dataset)
+
+        if ds is not None:
+            if lim[0] is None:
+                lim[0] = ds.first_valid_index()
+            if lim[1] is None:
+                lim[1] = ds.last_valid_index()
+
+            return ds[(ds.index>=lim[0]) & (ds.index<=lim[1])]
+        else:
+            return None
+
 
 class AirTemp(ClimateTimeSeriesBase):
     identifier = ['AT', 'ATmin', 'ATmax']
+    unit = ['celsius', 'celsius', 'celsius']    # units as defined by the Pint package
+    daily_aggregator = 'mean'   
 
     def __init__(self, AT=None, ATmin=None, ATmax=None, minmax_data_threshold=6):
         # Takes air temperature time series (pandas Series) with datetime index as input argument.
@@ -595,54 +711,118 @@ class AirTemp(ClimateTimeSeriesBase):
         super().__init__(AT=AT, ATmin=ATmin, ATmax=ATmax)
 
         #self.raw_data = pd.concat([at_series, at_min, at_max], axis=1, keys=['AT', 'min', 'max'])
-        self.calc_daily_avg()
+        self.aggregate_daily()
 
-    def calc_daily_avg(self):
-        grouped = self.raw_data.groupby(self.raw_data.index.date)
+    def extract_AT_min_max(self):
+        """Extract min and max temperatures based on specific
+        times of day, on days where the daily data threshold is not met,
+        and where min/max values are not aready available."""
 
-        if ('ATmin' in self.raw_data.columns) and ('ATmax' in self.raw_data.columns):
-            # Use either min/max average or actual data value averages, depending on daily data count
-            mean_values = np.where(grouped['AT'].count() <= self.minmax_data_threshold,
-                                   (grouped['ATmax'].mean() + grouped['ATmin'].mean()) / 2,
-                                   grouped['AT'].mean())
+        counts = self.raw_data.groupby(self.raw_data.index.date).count()
 
-            # For days where min/max average was used, set count to -1
-            mean_count = np.where(grouped['AT'].count() <= self.minmax_data_threshold,
-                                  -np.ones(len(mean_values)),
-                                  grouped['AT'].count())
+        if ('ATmin' in counts.columns) & ('ATmax' in counts.columns):
+            # We already have some ATmin/ATmax values
 
-            # Set count to 0 on days where min/max calculation is unsuccessful
-            mean_count = np.where(np.logical_and(mean_count == -1, np.isnan(mean_values)),
-                                    np.zeros(len(mean_count)),
-                                    mean_count)
+            # PSEUDO CODE
+            # where AT.count < data threshold
+            #       and ATmin.count = 0
+            #       and ATmax.count = 0
+            #    take 00:00:00 as ATmin (if it exists)
+            #    take 12:00:00 as ATmax (if it exists)
+
+            idx = (counts['AT']<self.daily_data_threshold) & (counts['ATmin']==0) & (counts['ATmax']==0).values
+            
+            ds_idx = self.raw_data.index.floor('d').isin(counts[idx].index)
+
+            rd = self.raw_data
+            rd['ATmin'].iloc[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)]['AT']
+            rd['ATmax'].iloc[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)]['AT']
+
         else:
-            # if ATmin and ATmax are not specified, just calculate means and counts
-            # from AT time series measurements
-            mean_values = grouped.mean()
-            mean_count = grouped.count()
+            # We have no ATmin/ATmax values, and must create the columns
 
-        # Create new dataframe with daily averages
-        df_mean = pd.DataFrame(mean_values, index=np.unique(self.raw_data.index.date))
-        df_mean.columns = ['AT']
-        df_mean['count'] = mean_count
+            # PSEUDO CODE
+            # where AT.count < data threshold
+            #       and ATmin.count = 0
+            #       and ATmax.count = 0
+            #    take 00:00:00 as ATmin (if it exists)
+            #    take 12:00:00 as ATmax (if it exists)
 
-        self.daily_avg = df_mean
+            idx = (counts['AT']<self.daily_data_threshold).values
+            
+            ds_idx = self.raw_data.index.floor('d').isin(counts[idx].index)
+
+            rd = self.raw_data
+            rd['ATmin'].iloc[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)]['AT']
+            rd['ATmax'].iloc[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)]['AT']
+
+
+    def aggregate_daily(self):
+        if self.daily_aggregator is not None:   
+            grouped = self.raw_data.groupby(self.raw_data.index.date)
+
+            if ('ATmin' in self.raw_data.columns) and ('ATmax' in self.raw_data.columns):
+                if 'AT' in self.raw_data.columns:
+                    # We have both AT, ATmin and ATmax, use mean(AT) where possible.
+
+                    # Use either min/max average or actual data value averages, depending on daily data count
+                    # some years have max and min measured twice per day... thus take the max.max and min.min
+                    mean_values = np.where(grouped['AT'].count() < self.minmax_data_threshold,
+                                            (grouped['ATmax'].max() + grouped['ATmin'].min()) / 2,
+                                            grouped['AT'].mean())
+
+                    # For days where min/max average was used, set count to -1
+                    mean_count = np.where(grouped['AT'].count() < self.minmax_data_threshold,
+                                          -np.ones(len(mean_values)),
+                                          grouped['AT'].count())
+                else:
+                    # We only have ATmin and ATmax, no AT
+                    # Use always average of ATmin and ATmax
+                    
+                    # some years have max and min measured twice per day... thus take the max.max and min.min
+                    mean_values = (grouped['ATmax'].max() + grouped['ATmin'].min()) / 2
+                    mean_count = -np.ones(len(mean_values))
+        
+                # Set count to 0 on days where min/max calculation is unsuccessful
+                mean_count = np.where(np.logical_and(mean_count == -1, np.isnan(mean_values)),
+                                      np.zeros(len(mean_count)),
+                                      mean_count)
+            else:
+                # if ATmin and ATmax are not specified, just calculate means and counts
+                # from AT time series measurements
+                mean_values = grouped.mean()
+                mean_count = grouped.count()
+
+            # Create new dataframe with daily averages
+            df_mean = pd.DataFrame(mean_values, index=pd.to_datetime(self.raw_data.index.date).unique())
+            df_mean.columns = ['AT']
+            df_mean['count'] = mean_count
+
+            #self.daily_avg = df_mean
+            self.daily_data = df_mean
+        else:
+            self.daily_data = None
+
+        if self.daily_data is not None:
+            self.daily_data = self.daily_data.asfreq('D')  # Make sure the timeseries is continuous
+            if not isinstance(self.identifier, str):
+                idx = [k for k in self.identifier if k in self.daily_data]
+            else:
+                idx = self.identifier
+            self.daily_data = self.daily_data[self.daily_data[idx].first_valid_index():self.daily_data[idx].last_valid_index()]
+
         
     def calc_MOAT(self):
         """Calculate monthly average air temperatures and statistics.
         Days with less than daily_data_threshold observations will be excluded from averages.
         """
-        temp = self.daily_avg.drop('count', axis=1)
+        temp = self.daily_data.drop('count', axis=1)
         
         # add ymd information
         temp = pd.concat([temp, self.get_ymd(temp)], axis=1)
 
         # Exclude days with too few measurements
-        if self.daily_data_threshold == 0:
-            id_exclude = np.zeros_like(self.daily_avg['AT'], dtype=bool)
-        else:
-            id_exclude = np.logical_and(self.daily_avg['count'] >= 0, self.daily_avg['count'] <= self.daily_data_threshold)
-                    
+        id_exclude = np.logical_and(self.daily_data['count'] >= 0, self.daily_data['count'] <= self.daily_data_threshold)
         temp.loc[id_exclude, 'AT'] = np.NaN
         
         # flag any incomplete days, so they will not be included in the statistics for annual averages
@@ -774,11 +954,32 @@ class AirTemp(ClimateTimeSeriesBase):
 
         return maat
 
-    def merge_with(self, other, in_place=True):
+    def merge_with(self, other, inplace=True):
         """Merge this timeseries with other time series, return new combined timeseries."""
-        new_cd = super().merge_with(other, in_place=in_place)
-        new_cd.calc_daily_avg()
+        new_cd = super().merge_with(other, inplace=inplace)
+        try:
+            new_cd.aggregate_daily()
+        except KeyError:
+            # One of the necessary parameters were not present ['AT', 'ATmax' or 'ATmin']
+            pass
         return new_cd
+
+    def get_scale_bias_to(self, other):
+        """Return scale and bias of this timeseries relative to other timeseries.
+        returns [scale, bias, r_sq] such that other.AT = scale * self.AT + bias
+        """
+        ids = self.daily_data.dropna(subset=['AT']).index.intersection(other.daily_data.dropna(subset=['AT']).index)
+
+        x = self.daily_data.loc[ids, 'AT']
+        y = other.daily_data.loc[ids, 'AT']
+        
+        p, cov = np.polyfit(x, y, 1, cov=True)
+
+        func = lambda x: np.polyval(p,x)
+
+        r_sq = 1 - (sum((y - func(x))**2) / ((len(y) - 1) * np.var(y, ddof=1)))
+
+        return p[0], p[1], r_sq
 
     def scale_debias_to(self, other):
         """Scale and bias correct this timeseries to other timeseries.
@@ -789,24 +990,27 @@ class AirTemp(ClimateTimeSeriesBase):
         else:
             raise ValueError('Unable to scale instances of {0} to {1}'.format(type(self), type(other)))
 
-        ids = self.daily_avg.dropna(subset=['AT']).index.intersection(other.daily_avg.dropna(subset=['AT']).index)
+        # ids = self.daily_data.dropna(subset=['AT']).index.intersection(other.daily_data.dropna(subset=['AT']).index)
         
-        x = self.daily_avg.loc[ids, 'AT']
-        y = other.daily_avg.loc[ids, 'AT']
+        # x = self.daily_data.loc[ids, 'AT']
+        # y = other.daily_data.loc[ids, 'AT']
         
-        p, cov = np.polyfit(x, y, 1, cov=True)
+        # p, cov = np.polyfit(x, y, 1, cov=True)
+
+        scale, bias, r_sq = self.get_scale_bias_to(other)
 
         def a2b(x):
             """Return a 1D polynomial."""
-            return np.polyval(p, x) 
+            return np.polyval([scale, bias], x)
 
-        new.daily_avg['AT'] = a2b(new.daily_avg['AT'])
+        new.daily_data['AT'] = a2b(new.daily_data['AT'])
         
         return new
 
 		
 class DegreeDays(ClimateTimeSeriesBase):
     identifier = 'DD'
+    unit = 'celsius*day'    # units as defined by the Pint package
     
     def __init__(self, AT=None):
         # Takes AirTemp instance or air temperature time series (pandas Series)
@@ -835,12 +1039,12 @@ class DegreeDays(ClimateTimeSeriesBase):
 
         """
         # Exclude days with too few measurements
-        temp = self.AT.daily_avg.drop('count', axis=1)
+        temp = self.AT.daily_data.drop('count', axis=1)
         
         # add ymd information
         temp = pd.concat([temp, self.get_ymd(temp)], axis=1)
 
-        temp.loc[(self.AT.daily_avg['count'] >= 0) & (self.AT.daily_avg['count'] < self.daily_data_threshold), 'AT'] = np.NaN
+        temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] < self.daily_data_threshold), 'AT'] = np.NaN
 
         # flag any incomplete days, so they will not be included in the statistics for annual averages
         temp.year = np.where(np.isnan(temp['AT']), temp['AT'], temp.year)
@@ -871,6 +1075,7 @@ class DegreeDays(ClimateTimeSeriesBase):
         
 class AccumulatedDegreeDays(DegreeDays):
     identifier = 'ADD'
+    unit = 'celsius*day'    # units as defined by the Pint package
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -885,12 +1090,12 @@ class AccumulatedDegreeDays(DegreeDays):
 
         """
         # Exclude days with too few measurements
-        temp = self.AT.daily_avg.drop('count', axis=1)
+        temp = self.AT.daily_data.drop('count', axis=1)
         
         # add ymd information
         temp = pd.concat([temp, self.get_ymd(temp)], axis=1)
         
-        temp.loc[(self.AT.daily_avg['count'] >= 0) & (self.AT.daily_avg['count'] <= self.daily_data_threshold), 'AT'] = np.NaN
+        temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] <= self.daily_data_threshold), 'AT'] = np.NaN
         
         temp['CDD'] = temp.groupby(lambda x: x.year)['AT'].cumsum()
         
@@ -1005,26 +1210,36 @@ class AccumulatedDegreeDays(DegreeDays):
 
 class Wind(ClimateTimeSeriesBase):
     identifier = ['WS', 'WD']
+    unit = ['m/s', 'degree']    # units as defined by the Pint package
+    daily_aggregator = ['mean', 'mean']
     pass
 
 
 class Precipitation(ClimateTimeSeriesBase):
     identifier = 'PRE'
+    unit = 'mm'    # units as defined by the Pint package
+    daily_aggregator = 'sum'
     pass
 
 
 class RelativeHumidity(ClimateTimeSeriesBase):
     identifier = 'RH'
+    unit = 'percent'    # 'percent' is not in Pint package, needs custom declaration, see https://stackoverflow.com/a/39154101
+    daily_aggregator = 'mean'
     pass
 
 
 class SnowDepth(ClimateTimeSeriesBase):
     identifier = 'SD'
+    unit = 'm'    # units as defined by the Pint package
+    daily_aggregator = 'max'
     pass
 
 
 class AirPressure(ClimateTimeSeriesBase):
     identifier = 'AP'
+    unit = 'hPa'    # units as defined by the Pint package
+    daily_aggregator = 'mean'
     pass
 
 
@@ -1072,6 +1287,7 @@ class ClimateDataSetBase:
         # Data threshold for annual FDD/TDD calculation
         self.dd_data_threshold = 340  # measurements per year
 
+        self.station_name = ""
         self.raw_data = None
         self.converted = None
         self.datasets = {}
@@ -1101,13 +1317,13 @@ class ClimateDataSetBase:
         """Abstract method for validating data from file. Should be implemented in subclass."""
         raise NotImplementedError()
         
-    def merge_with(self, other, in_place=True, warn=True):
+    def merge_with(self, other, inplace=True, warn=True):
         """Merge this Climate Data collection with other Climate Data collection,
         by looping over individual datasets and merging them individually."
         
         Returns a new ClimateSeries instance."""
 
-        if in_place:
+        if inplace:
             new = self
         else:
             new = copy.copy(self)   
@@ -1117,43 +1333,47 @@ class ClimateDataSetBase:
 
         keys = set([*self.datasets.keys(), *other.datasets.keys()])
         for k in keys:
-            if k in self.datasets and k in other.datasets:
+            if (k in self.datasets) and (k in other.datasets) and (self.datasets[k] is not None) and (other.datasets[k] is not None):
                 try:
                     new.datasets[k] = self.datasets[k].merge_with(other.datasets[k])
-                except NotCompatibleError as e:
-                    print(e.message)
-            elif k in self.datasets:
+                except NotCompatibleError as err:
+                    print(err)
+            elif (k in self.datasets) and (self.datasets[k] is not None):
                 new.datasets[k] = self.datasets[k]
                 if warn:
                     print('Dataset {0} only present in first dataset. Copied, no merge possible.'.format(k))
-            elif k in other.datasets:
+            elif (k in other.datasets) and (other.datasets[k] is not None):
                 new.datasets[k] = other.datasets[k]
                 if warn:
                     print('Dataset {0} only present in second dataset. Copied, no merge possible.'.format(k))
+            else:
+                new.datasets[k] = None
+                if warn:
+                    print('Dataset {0} is not present in any of the datasets.'.format(k))
         
         return new
 
     def scale_debias_to(self, other, warn=True):
         """ """
-
         new = copy.copy(self)   
         
-        # should NEW be recast as ClimateDataBase, or e.g. a new class ClimateDataCombined?
-        # ClimateDataCombined could inherit from ClimateDataBase.
+        # should NEW be recast as ClimateDataSetBase, or e.g. a new class ClimateDataSetCombined?
+        # ClimateDataCombined could inherit from ClimateDataSetBase.
 
         keys = set([*self.datasets.keys(), *other.datasets.keys()])
         for k in keys:
             if k in self.datasets and k in other.datasets:
                 try:
-                    new.datasets[k] = self.datasets[k].merge_with(other.datasets[k])
-                except AttributeError as e:
+                    new.datasets[k] = self.datasets[k].scale_debias_to(other.datasets[k])
+                except AttributeError as err:
                     # so we didn't have a scale_debias_to method...
-                    pass
-                except NotImplementedError as e:
-                    # so we didn't have a scale_debias_to method...
-                    pass
-                except NotCompatibleError as e:
-                    print(e.message)
+                    new.datasets[k] = None
+                except NotImplementedError as err:
+                    # scale_debias_to raised NotImplementedError...
+                    new.datasets[k] = None
+                except NotCompatibleError as err:
+                    print(err)
+                    new.datasets[k] = None
             elif k in self.datasets:
                 new.datasets[k] = None
                 if warn:
@@ -1162,6 +1382,56 @@ class ClimateDataSetBase:
                 new.datasets[k] = None
                 if warn:
                     print('Dataset {0} only present in second dataset. No scale/debias possible.'.format(k))
+        
+        return new
+
+    def copy_missing_from(self, other, keys=None, inplace=False):
+        """Copy missing datasets from other.
+        Takes keyword argument 'keys' as a list of dataset identifiers to copy.
+        If 'keys' is empty (default) any missing dataset will be copied.
+        
+        Returns a new ClimateSeries instance."""
+
+        if inplace:
+            new = self
+        else:
+            new = copy.copy(self)   
+        
+        if keys is None:
+            keys = set(*other.datasets.keys())
+
+        for k in keys:
+            if (k not in self.datasets) or (self.datasets[k] is not None):
+                if (k in other.datasets):
+                    new.datasets[k] = other.datasets[k]
+        
+        return new
+
+    def aggregate_daily(self):
+        """Aggregate raw data into daily values, using the aggregation method
+        specified for each timeseries class.
+        Aggregation will be applied to each timeseries in the dataset
+        """
+        for k in self.datasets.keys():
+            if (k in self.datasets) and (self.datasets[k] is not None):
+                self.datasets[k].aggregate_daily()
+        
+    def limit(self, lim:list[Union[str,dt.datetime,dt.date, None]], inplace:bool=False):
+        """Limit all timeseries in dataset to the specified start and end time.
+        Input:
+            List of start and end times, may be string, or datetime or date types.
+        Return:
+            New ClimateDataSet with the time series limited to the specified range
+        """
+        if inplace:
+            new = self
+        else:
+            new = copy.deepcopy(self) 
+
+        if lim is not None:
+            for k in self.datasets.keys():
+                if (k in self.datasets) and (self.datasets[k] is not None):
+                    new.datasets[k].limit(lim)
         
         return new
 
@@ -1260,6 +1530,35 @@ class DMIType1(ClimateDataSetBase):
             return False
         else:
             return True
+
+    def extract_AT_min_max(self):
+        """Extract min and max temperatures based on specific
+        times of day, on days where the daily data threshold is not met,
+        and where min/max values are not aready available."""
+
+        counts = self.datasets['AT'].raw_data.groupby(self.datasets['AT'].raw_data.index.date).count()
+
+        if ('ATmin' in counts.columns) & ('ATmax' in counts.columns):
+            # We already have some ATmin/ATmax values
+
+            # PSEUDO CODE
+            # where AT.count < data threshold
+            #       and ATmin.count = 0
+            #       and ATmax.count = 0
+            #    take 00:00:00 as ATmin (if it exists)
+            #    take 12:00:00 as ATmax (if it exists)
+
+            idx = (counts['AT']<self.datasets['AT'].daily_data_threshold) & (counts['ATmin']==0) & (counts['ATmax']==0).values
+            
+            ds_idx = self.datasets['AT'].raw_data.index.floor('d').isin(counts[idx].index)
+
+            rd = self.datasets['AT'].raw_data
+            rd['ATmin'].iloc[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)]['AT']
+            rd['ATmax'].iloc[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)]['AT']
+
+        else:
+            # We have no ATmin/ATmax values, and must create the columns
+            pass
 
     def __calc_daily_averages(self):
 
@@ -1557,73 +1856,138 @@ class DMITypeX(DMIType2):
         #self.datasets['SD'] = SnowDepth(SD=raw_data['XXX'])
 
 
-class DMITypeLong(DMIType1):
-    type = 'DMILong'
-    description = 'Data format combined long air temperature dataseries from DMI'
+class DMITypeLongDaily(ClimateDataSetBase):
+    type = 'DMILongDaily'
+    description = 'Data format combined long daily climate dataseries from DMI'
 
-    def __init__(self, station_name='99999', **kwargs):
-        # raise NotImplementedError()
+    def __init__(self, station_name, data_path=None):
+        super().__init__()
 
-        # Each station consists of three files,
+        if data_path is None:
+            data_repository = DataRepository(DMI_PATH_LONG_FORMAT)
+        else:
+            data_repository = DataRepository(data_path)
+
+        self.station_name = station_name
+
+        # check if station exists
+        filepattern = 'gr_daily_{0}_*.csv'.format(station_name)
+        flist = data_repository.glob(filepattern)
+        if len(flist)==0:
+            raise ValueError('Station name "{0}" was not found in repository'.format(station_name))
+
+        # Each station consists of up to four files (but not necessarily all of them),
         # _112  Highest temperature
         # _122  Lowest temperature
+        # _401  Atmospheric pressure
         # _601  Accuumulated precipitation
 
         # read them, and instantiate each series as ClimateSeriesBase.
+        name_112 = 'gr_daily_{0}_112.csv'.format(station_name)
+        if data_repository.exists(name_112):
+            file = data_repository.get_file(name_112)
+            self.read_112_data(file, encoding=file.encoding)
 
-        long_data_repository = DataRepository(DMI_PATH_LONG_FORMAT)
+        name_122 = 'gr_daily_{0}_122.csv'.format(station_name)
+        if data_repository.exists(name_122):
+            file = data_repository.get_file(name_122)
+            self.read_122_data(file, encoding=file.encoding)
 
-        # station names can be like 99999, 34221, 04221 or 4221
-        # parse old and new station names
-        if len(station_name) == 5 and station_name[0] == '0':
-            self.station_name = station_name[1:]
-        else:
-            self.station_name = station_name
+        name_601 = 'gr_daily_{0}_601.csv'.format(station_name)
+        if data_repository.exists(name_601):
+            file = data_repository.get_file(name_601)
+            self.read_601_data(file, encoding=file.encoding)
+        
+        # name_401 = 'gr_daily_{0}_401.csv'.format(station_name)
+        # if data_repository.exists(name_401):
+        #     file = data_repository.get_file(name_401)
+        #     self.read_401_data(file)
 
-        super().__init__('gr_monthly_all_1784_2020.csv', filepath=DMI_PATH_LONG_FORMAT, encoding=None)
 
-
-    def read_data(self, file, encoding=None):
+    def read_raw_data(self, file, encoding=None):
         # Read time series and process date columns
+        raw_data = pd.read_csv(file, sep=';', na_values=['null', '-999,9'], decimal=',', encoding=encoding, comment='#')
 
-        month_translation = {'jan': 1,
-                             'feb': 2,
-                             'mar': 3,
-                             'apr': 4,
-                             'may': 5,
-                             'jun': 6,
-                             'jul': 7,
-                             'aug': 8,
-                             'sep': 9,
-                             'oct': 10,
-                             'nov': 11,
-                             'dec': 12}
+        dates = pd.to_datetime(raw_data['year'] * 1000000 + raw_data['month'] * 10000 + raw_data['day'] * 100 + raw_data['hour'], format='%Y%m%d%H')
 
-        months = list(month_translation.keys())
-        month_nos = list(month_translation.values())
+        # Index the dataframe based on datetimes
+        raw_data.index = pd.DatetimeIndex(dates)
+        raw_data = raw_data[raw_data.index.notnull()]
+        return raw_data
 
-        elem_no_translation = {101: 'AT',
-                               111: 'ATmaxAvg', 
-                               112: 'ATmax', 
-                               121: 'ATminAvg', 
-                               122: 'ATmin', 
-                               401: 'AP', 
-                               601: 'PRE',
-                               602: 'PRE_max_24h', 
-                               701: 'days with snow', 
-                               801: 'cloud cover'}
-                               
-        # From the dmi report:
-        # 101 Average air temperature                    average     °C
-        # 111 Average of daily maximum air temperature   average     °C
-        # 112 Highest air temperature                    max         °C
-        # 121 Average of daily minimum air temperature   average     °C
-        # 122 Lowest air temperature                     min         °C
-        # 401 Atmospheric pressure (msl)                 obs/average hPa
-        # 601 Accumulated precipitation                  sum         mm
-        # 602 Highest 24-hour precipitation              max         mm
-        # 701 Number of days with snow cover (> 50 % covered) sum    days
-        # 801 Average cloud cover                        average     %
+    def read_112_data(self, file, encoding=None):
+        # Read time series and process date columns
+        raw_data = self.read_raw_data(file, encoding)
+        
+        ts = AirTemp(ATmax=raw_data['elem_val'])
+        if 'AT' in self.datasets:
+            self.datasets['AT'] = self.datasets['AT'].merge_with(ts)
+        else:
+            self.datasets['AT'] = ts
+
+    def read_122_data(self, file, encoding=None):
+        # Read time series and process date columns
+        raw_data = self.read_raw_data(file, encoding)
+
+        ts = AirTemp(ATmin=raw_data['elem_val'])
+        if 'AT' in self.datasets:
+            self.datasets['AT'] = self.datasets['AT'].merge_with(ts)
+        else:
+            self.datasets['AT'] = ts
+
+    def read_601_data(self, file, encoding=None):
+        # Read time series and process date columns
+        raw_data = self.read_raw_data(file, encoding)
+        
+        ts = Precipitation(PRE=raw_data['elem_val'])
+        if 'PRE' in self.datasets:
+            self.datasets['PRE'] = self.datasets['PRE'].merge_with(ts)
+        else:
+            self.datasets['PRE'] = ts
+
+
+class DMITypeLongMonthly(ClimateDataSetBase):
+    type = 'DMILongMonthly'
+    description = 'Data format combined long monthly climate dataseries from DMI'
+
+    month_translation = {'jan': 1,
+                            'feb': 2,
+                            'mar': 3,
+                            'apr': 4,
+                            'may': 5,
+                            'jun': 6,
+                            'jul': 7,
+                            'aug': 8,
+                            'sep': 9,
+                            'oct': 10,
+                            'nov': 11,
+                            'dec': 12}
+
+    months = list(month_translation.keys())
+    month_nos = list(month_translation.values())
+
+    elem_no_translation = {101: 'AT',
+                            111: 'ATmaxAvg', 
+                            112: 'ATmax', 
+                            121: 'ATminAvg', 
+                            122: 'ATmin', 
+                            401: 'AP', 
+                            601: 'PRE',
+                            602: 'PRE_max_24h', 
+                            701: 'days with snow', 
+                            801: 'cloud cover'}
+                            
+    # From the dmi report:
+    # 101 Average air temperature                    average     °C
+    # 111 Average of daily maximum air temperature   average     °C
+    # 112 Highest air temperature                    max         °C
+    # 121 Average of daily minimum air temperature   average     °C
+    # 122 Lowest air temperature                     min         °C
+    # 401 Atmospheric pressure (msl)                 obs/average hPa
+    # 601 Accumulated precipitation                  sum         mm
+    # 602 Highest 24-hour precipitation              max         mm
+    # 701 Number of days with snow cover (> 50 % covered) sum    days
+    # 801 Average cloud cover                        average     %
 
         raw_data = pd.read_csv(file, sep=';', na_values=['null', '-999,9'], decimal=',', encoding=encoding, comment='#')
 
@@ -1658,6 +2022,28 @@ class DMITypeLong(DMIType1):
 
         if not df_station[df_station['parameter']=='AP']['value'].isna().all():
             self.datasets['AP'] = AirPressure(AP=df_station[df_station['parameter']=='AT']['value'])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 class NESDISType(ClimateDataSetBase):
@@ -1820,11 +2206,42 @@ class DMIUnified(ClimateDataSetBase):
             cd_new = DMIType2(self.new_file, encoding=self.new_file.encoding)
             self.merge_with(cd_new, warn=False)
 
+    def extract_AT_min_max(self):
+        """Extract min and max temperatures based on specific
+        times of day, on days where the daily data threshold is not met,
+        and where min/max values are not aready available."""
+
+        counts = self.datasets['AT'].raw_data.groupby(self.datasets['AT'].raw_data.index.date).count()
+
+        if ('ATmin' in counts.columns) & ('ATmax' in counts.columns):
+            # We already have some ATmin/ATmax values
+
+            # PSEUDO CODE
+            # where AT.count < data threshold
+            #       and ATmin.count = 0
+            #       and ATmax.count = 0
+            #    take 00:00:00 as ATmin (if it exists)
+            #    take 12:00:00 as ATmax (if it exists)
+
+            idx = (counts['AT']<self.datasets['AT'].daily_data_threshold) & (counts['ATmin']==0) & (counts['ATmax']==0).values
+            
+            ds_idx = self.datasets['AT'].raw_data.index.floor('d').isin(counts[idx].index)
+
+            rd = self.datasets['AT'].raw_data
+            rd['ATmin'].iloc[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==0) & (rd.index.minute==0)]['AT']
+            rd['ATmax'].iloc[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)] = rd[ds_idx & (rd.index.hour==12) & (rd.index.minute==0)]['AT']
+
+
+        else:
+            # We have no ATmin/ATmax values, and must create the columns
+            pass
+
 
 CLIMATE_FILE_CLASSES = {'DMI1': DMIType1,
                         'DMI2': DMIType2,
                         'DMI3': DMIType3,
                         'DMIX': DMITypeX,
+                        'DMILongDaily': DMITypeLongDaily,
                         'DMILong': DMITypeLong,
                         'NESDIS': NESDISType,
                         'US_YDE': CustomType1,}
@@ -1912,13 +2329,14 @@ def plot_maat_dd(df_maat, df_dd, title='MAAT+DegreeDay plot', ax=None, cmaat='k'
     plt.gcf().suptitle(title)
     return ax
 
-def cross_plot_temp(sta1, sta2, title='Cross-plot'):
+def cross_plot_temp(sta1, sta2, title='Cross-plot', ax=None):
     """Create a cross plot of data from the two stations passed."""
 
     #raise NotImplementedError()
 
-    fig = plt.figure()
-    ax1 = plt.subplot(111)
+    if ax is None:
+        fig = plt.figure()
+        ax = plt.subplot(111)
     
     def a2b(p):
         """Return a 1D polynomial."""
@@ -1928,28 +2346,41 @@ def cross_plot_temp(sta1, sta2, title='Cross-plot'):
         """Return a 1D polynomial."""
         return lambda x: np.polyval([1/p[0], -p[1]/p[0]], x) 
     
-    ids = sta1.datasets['AT'].daily_avg.dropna(subset=['AT']).index.intersection(sta2.datasets['AT'].daily_avg.dropna(subset=['AT']).index)
+    ids = sta1.datasets['AT'].daily_data.dropna(subset=['AT']).index.intersection(sta2.datasets['AT'].daily_data.dropna(subset=['AT']).index)
     
-    x = sta1.datasets['AT'].daily_avg.loc[ids, 'AT']
-    y = sta2.datasets['AT'].daily_avg.loc[ids, 'AT']
+    x = sta1.datasets['AT'].daily_data.loc[ids, 'AT']
+    y = sta2.datasets['AT'].daily_data.loc[ids, 'AT']
     
-    ax1.scatter(x, y)
-    ax1.plot([-40, 15], [-40, 15], '--k')
-    #ax1.plot([0, 1], [0, 1], '--k', transform=ax1.transAxes)
-    ax1.axis('square')
+    ax.scatter(x, y)
+    ax.plot([-40, 15], [-40, 15], '--k')
+    #ax.plot([0, 1], [0, 1], '--k', transform=ax1.transAxes)
+    ax.axis('square')
     
-    ax1.set_xlabel(sta1.station_name+' Temperature [$^\circ$C]')
-    ax1.set_ylabel(sta2.station_name+' Temperature [$^\circ$C]')
+    ax.set_xlabel(sta1.station_name+' Temperature [$^\circ$C]')
+    ax.set_ylabel(sta2.station_name+' Temperature [$^\circ$C]')
     
     p, cov = np.polyfit(x, y, 1, cov=True)
     y_model = a2b(p)                                   # model using the fit parameters; NOTE: parameters here are coefficients
-    ax1.plot(x, y_model(x), "-", color="0.1", linewidth=1.5, alpha=0.5, label="Fit")
+    
+    r_sq = 1 - (sum((y - y_model(x))**2) / ((len(y) - 1) * np.var(y, ddof=1)))
+    #r_sq_b = np.corrcoef(x,y)[0, 1]**2
+    
+    ax.plot(x, y_model(x), "-", color="0.1", linewidth=1.5, alpha=0.5, label="Fit")
     
     #plot_trendline(sta1.AT_mean.loc[ids, 'AT'], sta2.AT_mean.loc[ids, 'AT'], ax=ax1)
     
-    plt.gcf().suptitle(title)
+    if np.sign(p[1]) == -1:
+        eqn = '$y = {0:.3f}\cdot x-{1:.3f}$\n$R^2 = {2:.3f}$\n$N = {3:.0f}$'.format(p[0], np.abs(p[1]), r_sq, len(x))
+    else:
+        eqn = '$y = {0:.3f}\cdot x+{1:.3f}$\n$R^2 = {2:.3f}$\n$N = {3:.0f}$'.format(p[0], np.abs(p[1]), r_sq, len(x))
+
+    text_kwargs = dict(ha='left', va='top', fontsize=10, color='k')
+    plt.text(0.05, 0.98, eqn,  transform=ax.transAxes, **text_kwargs)
     
-    return ax1
+    ax.set_title(title)
+    #plt.gcf().suptitle(title)
+    
+    return ax
     
 
 def plot_warming_stripes(cd, FIRST=None, LAST=None):
@@ -2077,7 +2508,7 @@ if __name__ == '__main__':
         
         out_file = '{0}_weather_proccessed.xlsx'.format(key)
         file = write_xlsx(out_file,                  # filename to write to    
-                          stations[key].datasets['AT'].daily_avg,     # dataframe to write
+                          stations[key].datasets['AT'].daily_data,     # dataframe to write
                           'Daily mean Tair',         # name of the sheet in the excel file
                           drop_cols=['stat_no', 'year', 'month', 'day', 'weekday', 'hour', 'minute'],   # names of columns NOT to write
                           overwrite=True)            # overwrites file if it exists (if False, an integer will be appended to the filename to make it unique)
@@ -2147,7 +2578,7 @@ if __name__ == '__main__':
     
     out_file = '{0}_weather_proccessed.xlsx'.format('ILU04216+ILU04221')
     file = write_xlsx(out_file,                  # filename to write to    
-                        new.datasets['AT'].daily_avg,     # dataframe to write
+                        new.datasets['AT'].daily_data,     # dataframe to write
                         'Daily mean Tair',         # name of the sheet in the excel file
                         drop_cols=['stat_no', 'year', 'month', 'day', 'weekday', 'hour', 'minute'],   # names of columns NOT to write
                         overwrite=True)            # overwrites file if it exists (if False, an integer will be appended to the filename to make it unique)
