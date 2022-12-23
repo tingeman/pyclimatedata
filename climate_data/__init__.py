@@ -185,9 +185,9 @@ class DataRepository():
         
         for dp in pathlist:
             if self.zipped:
-                filelist.append(zipfile.ZipFile(dp).namelist())
+                filelist.extend(zipfile.ZipFile(dp).namelist())
             else:
-                filelist.append([f.name for f in dp.glob('*.*')])
+                filelist.extend([f.name for f in dp.glob('*.*')])
         return filelist
 
     def glob(self, pattern):
@@ -201,10 +201,11 @@ class DataRepository():
 
         if self.zipped:
             re_pattern = re.compile(fnmatch.translate(pattern))
-            filelist.extend(list(filter(re_pattern.match, self.dir())))
+            filelist.extend(filter(re_pattern.match, self.dir()))
         else:
             for dp in pathlist:
                 filelist.extend([f.name for f in dp.glob(pattern)])
+        return filelist
 
     def get_filepath(self, filename):
         """Return the path that contains the filename passed."""
@@ -283,7 +284,7 @@ class DataFile(io.BytesIO):
         if not self._filename.exists():
             raise FileNotFoundError('File does not exist: {0}'.format(self._filename))
 
-        with open(self._filename.name, 'r') as file:
+        with open(self._filename, 'rb') as file:
             self.write(file.read())
 
     def get_encoding(self, count=300):
@@ -1457,6 +1458,7 @@ class DMIType3(DMIType2):
         if (not isinstance(file, DataFile)) & (file is not None):
             # File is a string or Path instance
             file = pathlib.Path(file)
+            self.station_name = file.stem
             if len(file.parts) == 1:
                 # file contains no path
                 if filepath is None:
@@ -1466,6 +1468,8 @@ class DMIType3(DMIType2):
                 # file contains a path, use it...
                 filepath = file.parent
                 file = file.name
+        else:
+            self.station_name = file._filename.stem
         
         super().__init__(file, filepath=filepath, encoding=encoding)
 
@@ -1504,7 +1508,9 @@ class DMIType3(DMIType2):
 
         # Now assign datasets where data is present
         if not self.raw_data['101'].isna().all():
-            self.datasets['AT'] = AirTemp(AT=raw_data['101'])
+            self.datasets['AT'] = AirTemp(AT=raw_data['101'],
+                                          ATmin=raw_data['123'],
+                                          ATmax=raw_data['113'])
         
         if not self.raw_data['201'].isna().all():
             self.datasets['RH'] = RelativeHumidity(RH=raw_data['201'])
