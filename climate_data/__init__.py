@@ -2050,7 +2050,7 @@ class DMITypeLongMonthly(ClimateDataSetBase):
             self.datasets['AT'] = AirTemp(AT=df_station[df_station['parameter']=='AT']['value'])
 
         if not df_station[df_station['parameter']=='PRE']['value'].isna().all():
-            self.datasets['PRE'] = Precipitation(AT=df_station[df_station['parameter']=='PRE']['value'])
+            self.datasets['PRE'] = Precipitation(PRE=df_station[df_station['parameter']=='PRE']['value'])
 
         if not df_station[df_station['parameter']=='AP']['value'].isna().all():
             self.datasets['AP'] = AirPressure(AP=df_station[df_station['parameter']=='AT']['value'])
