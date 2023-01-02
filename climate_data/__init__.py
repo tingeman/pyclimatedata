@@ -510,6 +510,7 @@ class ClimateTimeSeriesBase():
     daily_aggregator = None    # could be one of 'mean', 'sum', 'max' (see Pandas GroupBy computation methods)
     days = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
     months = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
+    _attrs = ['identifier', 'unit', 'daily_aggregator']
 
     def __init__(self, *args, **kwargs):
 
@@ -523,7 +524,8 @@ class ClimateTimeSeriesBase():
 
         self.raw_data = None
         self.daily_data = None
-        
+        name_list = []
+
         if npar >= 1:
             if len(args) == npar:
                 if npar >= 2:
@@ -533,22 +535,58 @@ class ClimateTimeSeriesBase():
                     args_list = [pd.to_numeric(a) for a in args if a is not None]
                     name_list = [self.identifier for k in range(len(args)) if args[k] is not None]
             elif len(args) == 0:
-                args_list = []
-                name_list = []
-                if npar >= 2:
-                    for k in self.identifier:
-                        if (k in kwargs) and (kwargs[k] is not None):
-                            args_list.append(pd.to_numeric(kwargs[k]))
-                            name_list.append(k)
-                else:
-                    if kwargs[self.identifier] is not None:
-                        args_list = [pd.to_numeric(kwargs[self.identifier])]
-                        name_list = [self.identifier]
+                if len(kwargs)>0:
+                    args_list = []
+                    name_list = []
+                    if npar >= 2:
+                        for k in self.identifier:
+                            if (k in kwargs) and (kwargs[k] is not None):
+                                args_list.append(pd.to_numeric(kwargs[k]))
+                                name_list.append(k)
+                    else:
+                        if kwargs[self.identifier] is not None:
+                            args_list = [pd.to_numeric(kwargs[self.identifier])]
+                            name_list = [self.identifier]
 
             if len(name_list) > 0:
                 self.raw_data = pd.concat(args_list, axis=1)
                 self.raw_data.columns = name_list
 
+    def register_attrs(self, attrs=[]):
+        self._attrs = self._attrs
+        self._attrs.extend(attrs)
+        # Now make sure only unique values exist
+        #if len(attrs)>0:
+        #    used = set()
+        #    self._attrs = [x for x in self._attrs if x not in used and (used.add(x) or True)]
+
+    def to_xarray(self):
+        import xarray as xr
+        ds = xr.Dataset.from_dataframe(self.raw_data)
+        for k in self._attrs:
+            try:
+                v = getattr(self, k)
+            except:
+                continue
+            if v is not None:
+                ds.attrs[k] = v
+            else:
+                ds.attrs[k] = 'None'
+        ds.attrs['__class__'] = '{0}.{1}'.format(self.__class__.__module__, self.__class__.__name__)
+        return ds
+
+    @classmethod
+    def from_xarray(cls, ds):
+        new = cls()
+        new.raw_data = ds.to_dataframe()
+        for k, v in ds.attrs.items():
+            if k == '__class__': continue
+            if v == 'None':
+                setattr(new, k, None)
+            else:
+                setattr(new, k, v)
+        new.aggregate_daily()        
+        return new
 
     def aggregate_daily(self):
         """Generic daily aggregator method. Maybe used to aggregate raw data into
@@ -564,6 +602,9 @@ class ClimateTimeSeriesBase():
             agg_count = grouped[parameter].count()
             agg_count.name = 'count_'+agg_count.name
             return agg_values, agg_count
+
+        if (self.raw_data is None):
+            return
 
         if self.daily_aggregator is not None:   
             grouped = self.raw_data.groupby(self.raw_data.index.date)
@@ -699,6 +740,10 @@ class AirTemp(ClimateTimeSeriesBase):
         #
         # For annual averages, filter out days with less than 20 measurements, assuming 24 measurements per day as nominal frequency
 
+        # store names of attributes that should be saved to disk when storing instance.
+        self.register_attrs(['data_freq', 'daily_data_threshold', 'annual_data_threshold', 
+                             'dd_data_threshold', 'minmax_data_threshold'])
+
         # Nominal data frequency
         self.data_freq = 24  # measurements per day
 
@@ -718,7 +763,8 @@ class AirTemp(ClimateTimeSeriesBase):
         super().__init__(AT=AT, ATmin=ATmin, ATmax=ATmax)
 
         #self.raw_data = pd.concat([at_series, at_min, at_max], axis=1, keys=['AT', 'min', 'max'])
-        self.aggregate_daily()
+        if self.raw_data is not None:
+            self.aggregate_daily()
 
     def extract_AT_min_max(self):
         """Extract min and max temperatures based on specific
@@ -765,6 +811,9 @@ class AirTemp(ClimateTimeSeriesBase):
 
 
     def aggregate_daily(self):
+        if (self.raw_data is None):
+            return
+
         if self.daily_aggregator is not None:   
             grouped = self.raw_data.groupby(self.raw_data.index.date)
 
@@ -1024,12 +1073,17 @@ class DegreeDays(ClimateTimeSeriesBase):
         # as input argument
         #
         
+        # store names of attributes that should be saved to disk when storing instance.
+        self.register_attrs(['daily_data_threshold', 'dd_data_threshold'])
+
         # Data threshold for daily averaging
         self.daily_data_threshold = 6  # measurements per day
 
         # Data threshold for annual FDD/TDD calculation
         self.dd_data_threshold = 340  # measurements per year
         
+        self.degree_days = None
+
         if not isinstance(AT, AirTemp):
             self.AT = AirTemp(AT)
         else:
@@ -1085,6 +1139,8 @@ class AccumulatedDegreeDays(DegreeDays):
     unit = 'celsius*day'    # units as defined by the Pint package
 
     def __init__(self, *args, **kwargs):
+        self.CDD = None
+        self.ADDT = None
         super().__init__(*args, **kwargs)
         self.calc_CDD()
         self.calc_ADDT()
@@ -1262,13 +1318,15 @@ class ClimateDataSetBase:
     methods specific to a certain format of input data.
     """
     
-    type = 'unknown'
+    dstype = 'unknown'
     description = 'BaseClass for climate data type'
-
+    
     days = {0: 'Mon', 1: 'Tue', 2: 'Wed', 3: 'Thu', 4: 'Fri', 5: 'Sat', 6: 'Sun'}
     months = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
 
-    def __init__(self, file=None, filepath=None, encoding=None):
+    _attrs = ['type', 'description']
+
+    def __init__(self, file=None, filepath=None, encoding=None, read_data=True):
         # Data aggregation criteria:
         #
         # If number of measurements per day is less than 6, use average of min and max temperature
@@ -1278,8 +1336,10 @@ class ClimateDataSetBase:
         #
         # For annual averages, filter out days with less than 20 measurements, assuming 24 measurements per day as nominal frequency
 
-        # Use min/max average when less than ndat_minmax measurements per day
-        self.minmax_data_threshold = 6
+        # store names of attributes that should be saved to disk when storing instance.
+        self.register_attrs(['data_freq', 'daily_data_threshold', 'annual_data_threshold', 
+                             'dd_data_threshold', 'minmax_data_threshold', 'station_name',
+                             'converted', 'filename', 'repository'])
 
         # Nominal data frequency
         self.data_freq = 24  # measurements per day
@@ -1293,6 +1353,9 @@ class ClimateDataSetBase:
 
         # Data threshold for annual FDD/TDD calculation
         self.dd_data_threshold = 340  # measurements per year
+
+        # Use min/max average when less than ndat_minmax measurements per day
+        self.minmax_data_threshold = 6
 
         try:
             _ = self.station_name
@@ -1314,8 +1377,81 @@ class ClimateDataSetBase:
             self.filename = file._filename
             self.encoding = file.encoding
         
-        if file is not None:
+        if (file is not None) and (read_data is True):
             self.read_data(file, self.encoding)
+
+    def register_attrs(self, attrs=[]):
+        self._attrs = self._attrs
+        self._attrs.extend(attrs)
+        # Now make sure only unique values exist
+        #if len(attrs)>0:
+        #    used = set()
+        #    self._attrs = [x for x in self._attrs if x not in used and (used.add(x) or True)]
+
+    def to_xarray(self):
+        import xarray as xr
+        ds = xr.Dataset()
+        for k in self._attrs:
+            try:
+                v = getattr(self, k)
+            except:
+                continue
+            if v is not None:
+                ds.attrs[k] = v
+            else:
+                ds.attrs[k] = 'None'
+        ds.attrs['datasets'] = list(self.datasets.keys())
+        ds.attrs['__class__'] = '{0}.{1}'.format(self.__class__.__module__, self.__class__.__name__)
+        return ds
+
+    def to_netcdf(self, filename):
+        ds = self.to_xarray()
+        ds.to_netcdf(filename, mode='w', group='metadata')
+        for k, thisds in self.datasets.items():
+            ds = thisds.to_xarray()
+            ds.to_netcdf(filename, mode='a', group='datasets/{0}'.format(k))
+
+    @classmethod
+    def from_netcdf(cls, filename):
+        import xarray as xr
+        import pydoc
+        ds = xr.open_dataset(filename, group='metadata')
+        
+        # trick from here: https://stackoverflow.com/a/55968374/1760389
+        #classname = ds.attrs.pop('__class__')
+        #thistype = pydoc.locate(classname)
+        __class__ = ds.attrs.pop('__class__')
+        toks = __class__.split('.')
+        module_name = '.'.join(toks[0:-1])
+        class_name = toks[-1]
+        module = __import__(module_name)
+        class_ = getattr(module, class_name)
+        new = class_(read_data=False)
+
+        datasets = ds.attrs.pop('datasets')
+        if isinstance(datasets, str):
+            datasets = [datasets]
+
+        for k, v in ds.attrs.items():
+            if v == 'None':
+                setattr(new, k, None)
+            else:
+                setattr(new, k, v)
+
+        for dsname in datasets:
+            tmpds = xr.open_dataset(filename, group='datasets/{0}'.format(dsname))
+        
+            # trick from here: https://stackoverflow.com/a/55968374/1760389
+            #thistype = pydoc.locate(tmpds.attrs['__class__'])
+            toks = tmpds.attrs['__class__'].split('.')
+            module_name = '.'.join(toks[0:-1])
+            class_name = toks[-1]
+            module = __import__(module_name)
+            class_ = getattr(module, class_name)
+            
+            new.datasets[dsname] = class_.from_xarray(tmpds)
+
+        return new
 
     def read_data(self, file, encoding=None):
         """Abstract method for reading data from file. Should be implemented in subclass.
@@ -1448,10 +1584,10 @@ class ClimateDataSetBase:
 
 
 class DMIType1(ClimateDataSetBase):
-    type = 'DMI1'
+    dstype = 'DMI1'
     description = 'Old DMI data type used for data provided until 2013'
 
-    def __init__(self, file, filepath=None, encoding=None):
+    def __init__(self, file, filepath=None, encoding=None, **kwargs):
         if (not isinstance(file, DataFile)) & (file is not None):
             # File is a string or Path instance
             file = pathlib.Path(file)
@@ -1465,7 +1601,7 @@ class DMIType1(ClimateDataSetBase):
                 filepath = file.parent
                 file = file.name
         
-        super().__init__(file, filepath=filepath, encoding=encoding)
+        super().__init__(file, filepath=filepath, encoding=encoding, **kwargs)
 
     def read_data(self, file, encoding=None):
 
@@ -1608,12 +1744,14 @@ class DMIType1(ClimateDataSetBase):
 
 class DMIType2(ClimateDataSetBase):
     # This is the new DMI data format starting from 2014
-    type = 'DMI2'
+    dstype = 'DMI2'
     description = 'New DMI data type used for data provided after 2014'
     decimal_point = ','
 
-    def __init__(self, file=None, filepath=None, encoding=None):
-        
+    def __init__(self, file=None, filepath=None, encoding=None, **kwargs):
+        # store names of attributes that should be saved to disk when storing instance.
+        self.register_attrs(['decimal_point'])
+
         if (not isinstance(file, DataFile)) & (file is not None):
             # File is a string or Path instance
             file = pathlib.Path(file)
@@ -1627,7 +1765,7 @@ class DMIType2(ClimateDataSetBase):
                 filepath = file.parent
                 file = file.name
         
-        super().__init__(file, filepath=filepath, encoding=encoding)
+        super().__init__(file, filepath=filepath, encoding=encoding, **kwargs)
 
     def read_data(self, file, encoding=None):
         raw_data = pd.read_csv(file, sep=';', dtype=float, na_values=[' ', '\t'], 
@@ -1759,12 +1897,14 @@ class DMIType3(DMIType2):
     # It includes all data (except snowdepth) from all stations, any data that could previously
     # be obtained through combination of DMIType1 and DMIType2 datasets.
     # It should be identical to DMIType2 except the decimal point changed from comma to point.
-    type = 'DMI3'
+    dstype = 'DMI3'
     description = 'New DMI data type introduced 2022, containing all historic data'
     decimal_point = '.'
 
-    def __init__(self, file=None, filepath=None, encoding=None):
-        
+    def __init__(self, file=None, filepath=None, encoding=None, **kwargs):
+        # store names of attributes that should be saved to disk when storing instance.
+        self.register_attrs(['decimal_point'])
+
         if (not isinstance(file, DataFile)) & (file is not None):
             # File is a string or Path instance
             file = pathlib.Path(file)
@@ -1778,10 +1918,12 @@ class DMIType3(DMIType2):
                 # file contains a path, use it...
                 filepath = file.parent
                 file = file.name
-        else:
+        elif file is not None:
             self.station_name = file._filename.stem
-        
-        super().__init__(file, filepath=filepath, encoding=encoding)
+        else: 
+            self.station_name = ''
+
+        super().__init__(file, filepath=filepath, encoding=encoding, **kwargs)
 
     def read_data(self, file, encoding=None):
         raw_data = pd.read_csv(file, sep=';', dtype=float, na_values=[' ', '\t'], 
@@ -1838,7 +1980,7 @@ class DMIType3(DMIType2):
         # New data format does not contain snow depths
 
 class DMITypeX(DMIType2):
-    type = 'DMIX'
+    dstype = 'DMIX'
     description = 'Not sure what filetype this is, but quite similar to DMIType2'
 
     def __init__(self, file, **kwargs):
@@ -1868,7 +2010,7 @@ class DMITypeX(DMIType2):
 
 
 class DMITypeLongDaily(ClimateDataSetBase):
-    type = 'DMILongDaily'
+    dstype = 'DMILongDaily'
     description = 'Data format combined long daily climate dataseries from DMI'
 
     def __init__(self, station_name, data_path=None):
@@ -1958,7 +2100,7 @@ class DMITypeLongDaily(ClimateDataSetBase):
 
 
 class DMITypeLongMonthly(ClimateDataSetBase):
-    type = 'DMITypeLongMonthly'
+    dstype = 'DMITypeLongMonthly'
     description = 'Data format combined long air temperature dataseries from DMI'
 
     def __init__(self, station_name='99999', **kwargs):
@@ -1978,7 +2120,7 @@ class DMITypeLongMonthly(ClimateDataSetBase):
         else:
             self.station_name = station_name
 
-        super().__init__('gr_monthly_all_1784_2020.csv', filepath=DMI_PATH_LONG_FORMAT, encoding=None)
+        super().__init__('gr_monthly_all_1784_2020.csv', filepath=DMI_PATH_LONG_FORMAT, encoding=None, **kwargs)
 
 
     def read_data(self, file, encoding=None):
@@ -2079,7 +2221,7 @@ class DMITypeLongMonthly(ClimateDataSetBase):
 
 
 class NESDISType(ClimateDataSetBase):
-    type = 'NESDIS'
+    dstype = 'NESDIS'
     description = 'Data type as retreived from NESDIS online database at https://www.ncdc.noaa.gov/cdo-web/'
 
     def __init__(self, file, **kwargs):
@@ -2148,7 +2290,7 @@ class NESDISType(ClimateDataSetBase):
 
 
 class CustomType1(ClimateDataSetBase):
-    type = 'US_YDE'
+    dstype = 'US_YDE'
     description = 'Custom data format for some data received from Jacob Yde'
 
     def __init__(self, file, **kwargs):
@@ -2189,11 +2331,11 @@ class CustomType1(ClimateDataSetBase):
 
 
 class DMIUnified(ClimateDataSetBase):
-    type = 'DMIUnified'
+    dstype = 'DMIUnified'
     description = 'Will read both old and new files for a given station, provided they are available'
 
-    def __init__(self, station_name, old_data_path=None, new_data_path=None):
-        super().__init__()
+    def __init__(self, station_name, old_data_path=None, new_data_path=None, **kwargs):
+        super().__init__(**kwargs)
 
         cd_old = None
         cd_new = None
