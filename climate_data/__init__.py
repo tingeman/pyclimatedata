@@ -427,7 +427,7 @@ def get_file_version(file_or_filename, encoding=None):
     #with open(file, 'r') as f:
     #    first_line = f.readline()
 
-    if first_line.startswith('Station;') and '101' in first_line:
+    if first_line.startswith('Station;') and (('101' in first_line) or ('601' in first_line)):
         if 'Year' in first_line:
             # This is the new DMI data format introduced in 2022
             version = 'DMI3'
@@ -1837,6 +1837,9 @@ class DMIType2(ClimateDataSetBase):
             # loop over additional columns to patch dataseries with
             # lower frequency measurements where missing
 
+            if not k in self.raw_data:
+                continue
+
             # find dates where dataset is all NaNs
             ndat_per_day = precip.notnull().groupby(lambda x: x.date).sum()
             dates = ndat_per_day[ndat_per_day==0]
@@ -1863,6 +1866,9 @@ class DMIType2(ClimateDataSetBase):
         10-minute averages where available, and otherwise
         hourly averages.
         """
+
+        if not '365' in self.raw_data:
+            return None
 
         wdir = self.raw_data['365'].copy()  # take all data from 365 column
 
@@ -1941,7 +1947,10 @@ class DMIType3(DMIType2):
 
         # 2019-1208:  Floating point version of date conversion broken - changed to integer version. Not sure if the datetime functionality changed?
         # dates = pd.to_datetime(raw_data['year']*1000000+raw_data['month']*10000+raw_data['day']*100+raw_data['hour(utc)'], format='%Y%m%d%H.%f')
-        dates = pd.to_datetime(raw_data['year'] * 1000000 + raw_data['month'] * 10000 + raw_data['day'] * 100 + raw_data['hour(utc)'], format='%Y%m%d%H')
+        if 'hour(utc)' in raw_data.columns: 
+            dates = pd.to_datetime(raw_data['year'] * 1000000 + raw_data['month'] * 10000 + raw_data['day'] * 100 + raw_data['hour(utc)'], format='%Y%m%d%H')
+        else:
+            dates = pd.to_datetime(raw_data['year'] * 1000000 + raw_data['month'] * 10000 + raw_data['day'] * 100, format='%Y%m%d%H')
 
         # Index the dataframe based on datetimes
         raw_data.index = pd.DatetimeIndex(dates)
@@ -1959,18 +1968,18 @@ class DMIType3(DMIType2):
         winddir = self._get_wind_directions()
 
         # Now assign datasets where data is present
-        if not self.raw_data['101'].isna().all():
+        if ('101' in self.raw_data) and (not self.raw_data['101'].isna().all()):
             self.datasets['AT'] = AirTemp(AT=raw_data['101'],
                                           ATmin=raw_data['123'],
                                           ATmax=raw_data['113'])
         
-        if not self.raw_data['201'].isna().all():
+        if ('201' in self.raw_data) and (not self.raw_data['201'].isna().all()):
             self.datasets['RH'] = RelativeHumidity(RH=raw_data['201'])
 
-        if not self.raw_data['401'].isna().all():
+        if ('401' in self.raw_data) and (not self.raw_data['401'].isna().all()):
             self.datasets['AP'] = AirPressure(AP=raw_data['401'])
         
-        if not (self.raw_data['301'].isna().all() & winddir.isna().all()):
+        if ('301' in self.raw_data) and (not (self.raw_data['301'].isna().all() & winddir.isna().all())):
             self.datasets['WIND'] = Wind(WS=raw_data['301'],
                                          WD=winddir)
         
