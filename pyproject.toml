@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyclimatedata"
+version = "0.1"
+description = "Package for reading and processing weather data, particularly from DMI, but can be modified to read files from any source."
+authors = [
+    { name = "Thomas Ingeman-Nielsen", email = "thin@dtu.dk" }
+]
+keywords = ["Weather data", "Climate data", "DMI"]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Development Status :: 3 - Alpha",
+    "Operating System :: Microsoft :: Windows",
+    "License :: OSI Approved :: GNU General Public License (GPL)",
+    "Intended Audience :: Science/Research",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering"
+]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy >= 2.1.0",
+    "pandas >= 2.2.0",
+    "matplotlib >= 3.4.0",
+    "chardet >= 4.0.0",
+    "rich >= 10.0.0",
+]
+
+
+[project.urls]
+homepage = "https://github.com/tingeman/pyclimatedata"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*.xml", "*.txt", "*.FOR", "*.for", "*.pyf", "*.pyd"]
+
+[tool.setuptools.package-data]
+"*" = ["*.xml", "*.txt", "*.FOR", "*.for", "*.pyf", "*.pyd"]
+
+[project.dependencies]
+numpy = "*"
+pandas = "*"
+matplotlib = "*"
+chardet = "*"
+rich = "*"
+ipdb = "*"
