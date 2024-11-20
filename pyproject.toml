@@ -9,6 +9,7 @@ description = "Package for reading and processing weather data, particularly fro
 authors = [
     { name = "Thomas Ingeman-Nielsen", email = "thin@dtu.dk" }
 ]
+license = { text = "GNU General Public License (GPL)" }
 keywords = ["Weather data", "Climate data", "DMI"]
 classifiers = [
     "Programming Language :: Python",
@@ -28,23 +29,18 @@ dependencies = [
     "matplotlib >= 3.4.0",
     "chardet >= 4.0.0",
     "rich >= 10.0.0",
+    "openpyxl >= 3.0.0",
 ]
-
 
 [project.urls]
 homepage = "https://github.com/tingeman/pyclimatedata"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["*.xml", "*.txt", "*.FOR", "*.for", "*.pyf", "*.pyd"]
+[tool.setuptools]
+packages = ["climate_data"]  # Alternatively, use "find" to automatically discover packages
+include-package-data = true
 
 [tool.setuptools.package-data]
 "*" = ["*.xml", "*.txt", "*.FOR", "*.for", "*.pyf", "*.pyd"]
 
-[project.dependencies]
-numpy = "*"
-pandas = "*"
-matplotlib = "*"
-chardet = "*"
-rich = "*"
-ipdb = "*"
+[project.optional-dependencies]
+# Define optional dependencies if any, e.g., for development or testing

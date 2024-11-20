@@ -27,6 +27,8 @@ from matplotlib.patches import Rectangle
 from matplotlib.collections import PatchCollection
 from matplotlib.colors import ListedColormap
 
+pd.set_option('future.no_silent_downcasting', True)
+
 # Install required packages:
 # conda install -c conda-forge ipdb rich
 # conda install numpy pandas matplotlib ipython openpyxl
@@ -172,7 +174,7 @@ class DataRepository():
     """Defines a common interface to handling data files stored in a directory or a zip-file.
     Implements 'dir', 'glob' and 'get_file' methods which works the same on both directories and zip files.
 
-    2022-12-18: Now also works with a list of pathd (e.g. list of zip-files). Will find the requested
+    2022-12-18: Now also works with a list of paths (e.g. list of zip-files). Will find the requested
                 file in any of the listed paths (whether zip or real folder)
 
     """
@@ -304,17 +306,26 @@ class DataFile(io.BytesIO):
     def _read_zipped_data(self):
         """Reads the contents of a file inside a zip-file and place it
         in the StringIO buffer. 
-        Currently only files in the root of the zip file can be handled."""
+        """
         if not self._filename.parent.exists():
             raise FileNotFoundError('File does not exist: {0}'.format(self._filename.parent))
 
         zf = zipfile.ZipFile(self._filename.parent)
 
-        if not self._filename.name in zf.namelist():
-            raise FileNotFoundError('File does not exist: {0}'.format(self._filename))
+        if self._filename.name in zf.namelist():
+            with zf.open(self._filename.name, 'r') as file:
+                self.write(file.read())
 
-        with zf.open(self._filename.name, 'r') as file:
-            self.write(file.read())
+        else:
+            file_exists = False
+            for f in zf.namelist():
+                if f.endswith(self._filename.name):
+                    with zf.open(f, 'r') as file:
+                        self.write(file.read())
+                        file_exists = True
+                    break   
+            if not file_exists:
+                raise FileNotFoundError('File does not exist: {0}'.format(self._filename))
 
     def _read_plain_data(self):
         """Reads the contents of a regular file and place it in the BytesIO buffer."""
@@ -395,7 +406,7 @@ def write_xlsx(file, df, sheet, cols=None, drop_cols=None, overwrite=False, **kw
     if drop_cols is not None:
         cols_to_write = [val for val in cols_to_write if val not in drop_cols]
 
-    df.to_excel(file, sheet, columns=cols_to_write, **kwargs)
+    df.to_excel(file, sheet_name=sheet, columns=cols_to_write, **kwargs)
 
     return file
 
@@ -470,24 +481,41 @@ def get_encoding(file_or_filename):
     return enc
 
 
-def load_climate_data(file_or_filename, repository=None):
+def load_climate_data(stno_or_file_or_filename, repository=None):
     """Instantiator function to make sure the right class is chosen for the file type"""
-
-    if hasattr(file_or_filename, '_filename'):
-        filename = pathlib.Path(file_or_filename._filename)
-    elif isinstance(file_or_filename, (str, pathlib.Path)):
-        filename = pathlib.Path(file_or_filename)
-    else:
-        raise ArgumentError('Unknown file type of filename/path type')
+    filename = None
 
     if repository is None:
-        # No repository was passed, infer from filename path
-        drp = DataRepository(pathlib.Path(filename.parent))
+        if pathlib.Path(stno_or_file_or_filename).name == stno_or_file_or_filename:
+            # no path information was passed, assume DMI UNIFIED format and repository
+            drp = DataRepository(DMI_PATH_UNIFIED_FORMAT)
+        else:
+            # argument contains path information
+            file_path = pathlib.Path(stno_or_file_or_filename.parent)
+            if file_path.exists():
+                drp = DataRepository(file_path)
+            else:
+                raise ArgumentError('Specified file path does not exist')
     elif isinstance(repository, DataRepository):
         drp = repository
     else:
         drp = DataRepository(repository)
-    
+
+    if hasattr(stno_or_file_or_filename, '_filename'):
+        filename = pathlib.Path(stno_or_file_or_filename._filename)
+    elif isinstance(stno_or_file_or_filename, pathlib.Path):
+        filename = stno_or_file_or_filename
+    elif isinstance(stno_or_file_or_filename, str):
+        # Check stno_or_file_or_filename is only alphanumeric
+        if stno_or_file_or_filename.isalnum():
+            # Assume it is a station number, and add the .txt extension
+            filename = pathlib.Path(stno_or_file_or_filename + '.csv')
+        else:
+            # Consider it a filename, possibly including a path
+            filename = pathlib.Path(stno_or_file_or_filename)
+    else:
+        raise ArgumentError('Unknown file type of filename/path type')
+
     filename = filename.name
     file = drp.get_file(filename)
     version = get_file_version(file)
@@ -690,13 +718,13 @@ class ClimateTimeSeriesBase():
 
         df = pd.DataFrame({'year':dates.year, 'month':dates.month, 'weekday': dates.weekday})
 
-        month_stats = df.groupby(['year', 'month']).agg(ndays=('month', len)).unstack().fillna(0)
+        month_stats = df.groupby(['year', 'month']).agg(ndays=('month', "size")).unstack().fillna(0)
         month_stats.columns = [self.months[x[1]] for x in month_stats.columns]
 
-        weekday_stats = df.groupby(['year', 'weekday']).agg(ndays=('weekday', len)).unstack().fillna(0)
+        weekday_stats = df.groupby(['year', 'weekday']).agg(ndays=('weekday', "size")).unstack().fillna(0)
         weekday_stats.columns = [self.days[x[1]] for x in weekday_stats.columns]
 
-        nday_stats = df.groupby(['year']).agg(ndays=('month', len))
+        nday_stats = df.groupby(['year']).agg(ndays=('month', "size"))
 
         stats = pd.concat([nday_stats, month_stats, weekday_stats], axis=1)
         return stats.loc[stats.index.isin(yearlist)]
@@ -879,7 +907,7 @@ class AirTemp(ClimateTimeSeriesBase):
 
         # Exclude days with too few measurements
         id_exclude = np.logical_and(self.daily_data['count'] >= 0, self.daily_data['count'] <= self.daily_data_threshold)
-        temp.loc[id_exclude, 'AT'] = np.NaN
+        temp.loc[id_exclude, 'AT'] = np.nan
         
         # flag any incomplete days, so they will not be included in the statistics for annual averages
         temp.year = np.where(np.isnan(temp['AT']), temp['AT'], temp.year)
@@ -887,15 +915,15 @@ class AirTemp(ClimateTimeSeriesBase):
         temp.weekday = np.where(np.isnan(temp['AT']), temp['AT'], temp.weekday)
 
         # Calculate the MAAT and related monthly and weekday stats
-        MAAT = temp.groupby(['year']).agg(MAAT=('AT', np.mean), ndays=('AT', len))
+        MAAT = temp.groupby(['year']).agg(MAAT=('AT', "mean"), ndays=('AT', "size"))
 
-        MAAT_month_AT = temp.groupby(['year', 'month']).agg(ndays=('AT', np.mean)).unstack().fillna(0)
+        MAAT_month_AT = temp.groupby(['year', 'month']).agg(ndays=('AT', "mean")).unstack().fillna(0)
         MAAT_month_AT.columns = ['T_{0}'.format(self.months[x[1]]) for x in MAAT_month_AT.columns]
 
-        MAAT_month_stats = temp.groupby(['year', 'month']).agg(ndays=('AT', len)).unstack().fillna(0)
+        MAAT_month_stats = temp.groupby(['year', 'month']).agg(ndays=('AT', "size")).unstack().fillna(0)
         MAAT_month_stats.columns = [self.months[x[1]] for x in MAAT_month_stats.columns]
 
-        MAAT_weekday_stats = temp.groupby(['year', 'weekday']).agg(ndays=('AT', len)).unstack().fillna(0)
+        MAAT_weekday_stats = temp.groupby(['year', 'weekday']).agg(ndays=('AT', "size")).unstack().fillna(0)
         MAAT_weekday_stats.columns = [self.days[x[1]] for x in MAAT_weekday_stats.columns]
 
         MOAT_stats = pd.concat([MAAT, MAAT_month_AT, MAAT_month_stats, MAAT_weekday_stats], axis=1)
@@ -1105,7 +1133,7 @@ class DegreeDays(ClimateTimeSeriesBase):
         # add ymd information
         temp = pd.concat([temp, self.get_ymd(temp)], axis=1)
 
-        temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] < self.daily_data_threshold), 'AT'] = np.NaN
+        temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] < self.daily_data_threshold), 'AT'] = np.nan
 
         # flag any incomplete days, so they will not be included in the statistics for annual averages
         temp.year = np.where(np.isnan(temp['AT']), temp['AT'], temp.year)
@@ -1113,10 +1141,10 @@ class DegreeDays(ClimateTimeSeriesBase):
         temp.weekday = np.where(np.isnan(temp['AT']), temp['AT'], temp.weekday)
 
         # Calculate freezing degree days
-        fdd = temp.loc[temp['AT'] < 0, ['AT', 'year']].groupby('year').agg(fdd=('AT', np.sum), fdd_days=('AT', len))
+        fdd = temp.loc[temp['AT'] < 0, ['AT', 'year']].groupby('year').agg(fdd=('AT', "sum"), fdd_days=('AT', "size"))
 
         # Calculate thawing degree days
-        tdd = temp.loc[temp['AT'] >= 0, ['AT', 'year']].groupby('year').agg(tdd=('AT', np.sum), tdd_days=('AT', len))
+        tdd = temp.loc[temp['AT'] >= 0, ['AT', 'year']].groupby('year').agg(tdd=('AT', "sum"), tdd_days=('AT', "size"))
 
         # Calculate total number of days included in tdd and fdd
         dsum = tdd.tdd_days + fdd.fdd_days
@@ -1158,7 +1186,7 @@ class AccumulatedDegreeDays(DegreeDays):
         # add ymd information
         temp = pd.concat([temp, self.get_ymd(temp)], axis=1)
         
-        temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] <= self.daily_data_threshold), 'AT'] = np.NaN
+        temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] <= self.daily_data_threshold), 'AT'] = np.nan
         
         temp['CDD'] = temp.groupby(lambda x: x.year)['AT'].cumsum()
         
@@ -1841,7 +1869,7 @@ class DMIType2(ClimateDataSetBase):
                 continue
 
             # find dates where dataset is all NaNs
-            ndat_per_day = precip.notnull().groupby(lambda x: x.date).sum()
+            ndat_per_day = precip.notnull().astype(int).groupby(precip.index.date).sum()
             dates = ndat_per_day[ndat_per_day==0]
 
             # find indices of these dates
@@ -1877,7 +1905,7 @@ class DMIType2(ClimateDataSetBase):
             # lower frequency measurements where missing
 
             # find dates where dataset is all NaNs
-            ndat_per_day = wdir.notnull().groupby(lambda x: x.date).sum()
+            ndat_per_day = wdir.notnull().astype(int).groupby(wdir.index.date).sum()
             dates = ndat_per_day[ndat_per_day==0]
 
             # find indices of these dates
@@ -2325,7 +2353,7 @@ class CustomType1(ClimateDataSetBase):
         # convert Farenheit to Celcius
         raw_data['ttt'] = raw_data['ttt'].apply(farenheit2celsius)
 
-        for key in ['txtxtx', 'tntntn', 'Tmean']: raw_data[key] = np.NaN
+        for key in ['txtxtx', 'tntntn', 'Tmean']: raw_data[key] = np.nan
         #raw_data['weekday'] = raw_data.index.weekday  # added to be used for calculating statistics
 
         self.raw_data = raw_data
@@ -2539,8 +2567,8 @@ def cross_plot_temp(sta1, sta2, title='Cross-plot', ax=None):
     #ax.plot([0, 1], [0, 1], '--k', transform=ax1.transAxes)
     ax.axis('square')
     
-    ax.set_xlabel(sta1.station_name+' Temperature [$^\circ$C]')
-    ax.set_ylabel(sta2.station_name+' Temperature [$^\circ$C]')
+    ax.set_xlabel(sta1.station_name+' Temperature [$^\\circ$C]')
+    ax.set_ylabel(sta2.station_name+' Temperature [$^\\circ$C]')
     
     p, cov = np.polyfit(x, y, 1, cov=True)
     y_model = a2b(p)                                   # model using the fit parameters; NOTE: parameters here are coefficients
@@ -2553,9 +2581,9 @@ def cross_plot_temp(sta1, sta2, title='Cross-plot', ax=None):
     #plot_trendline(sta1.AT_mean.loc[ids, 'AT'], sta2.AT_mean.loc[ids, 'AT'], ax=ax1)
     
     if np.sign(p[1]) == -1:
-        eqn = '$y = {0:.3f}\cdot x-{1:.3f}$\n$R^2 = {2:.3f}$\n$N = {3:.0f}$'.format(p[0], np.abs(p[1]), r_sq, len(x))
+        eqn = '$y = {0:.3f}\\cdot x-{1:.3f}$\n$R^2 = {2:.3f}$\n$N = {3:.0f}$'.format(p[0], np.abs(p[1]), r_sq, len(x))
     else:
-        eqn = '$y = {0:.3f}\cdot x+{1:.3f}$\n$R^2 = {2:.3f}$\n$N = {3:.0f}$'.format(p[0], np.abs(p[1]), r_sq, len(x))
+        eqn = '$y = {0:.3f}\\cdot x+{1:.3f}$\n$R^2 = {2:.3f}$\n$N = {3:.0f}$'.format(p[0], np.abs(p[1]), r_sq, len(x))
 
     text_kwargs = dict(ha='left', va='top', fontsize=10, color='k')
     plt.text(0.05, 0.98, eqn,  transform=ax.transAxes, **text_kwargs)
