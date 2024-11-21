@@ -256,8 +256,16 @@ class DataRepository():
 
         for dp in pathlist:
             if self.zipped:
-                if filename in zipfile.ZipFile(dp).namelist():
+                namelist = zipfile.ZipFile(dp).namelist()
+                
+                if filename in namelist:
+                    # File exists in the root of the zipfile, so return path to zipfile
                     return dp
+                else:
+                    for f in namelist:
+                        if f.endswith(filename):
+                            # filename was found at the end of a longer path, so return path to zipfile
+                            return dp
             else:
                 if (dp / filename).exists():
                     return dp
@@ -312,14 +320,18 @@ class DataFile(io.BytesIO):
 
         zf = zipfile.ZipFile(self._filename.parent)
 
-        if self._filename.name in zf.namelist():
+        namelist = zf.namelist()
+
+        if self._filename.name in namelist:
+            # File exists in the root of the zipfile
             with zf.open(self._filename.name, 'r') as file:
                 self.write(file.read())
-
         else:
+            # File was not found in the root, check in subfolders
             file_exists = False
-            for f in zf.namelist():
+            for f in namelist:
                 if f.endswith(self._filename.name):
+                    # filename was found at the end of a longer path, so read it...
                     with zf.open(f, 'r') as file:
                         self.write(file.read())
                         file_exists = True
@@ -357,6 +369,17 @@ def farenheit2celsius(f):
     """Convert degrees farenheit to celcius."""
     return (f - 32) * 5.0/9.0
 
+def celsius2farenheit(c):
+    """Convert degrees celcius to farenheit."""
+    return c * 9.0/5.0 + 32
+
+def inches2mm(inches):
+    """Convert inches to millimeters."""
+    return inches * 25.4
+
+def mm2inches(mm):
+    """Convert millimeters to inches."""
+    return mm / 25.4
 
 def write_xlsx(file, df, sheet, cols=None, drop_cols=None, overwrite=False, **kwargs):
     """Writes the dataframe to an excel file and the specified sheet name.
@@ -700,7 +723,9 @@ class ClimateTimeSeriesBase():
         return new
 
     def get_ymd(self, df):
-        # Return dataframe with year, month and weekday columns, which may be later used for calculating annual averages
+        """Return dataframe with year, month and weekday columns, which may be later used for 
+        calculating annual averages
+        """
         date_series = df.index.to_series()
         return pd.DataFrame({'year': date_series.apply(lambda x: x.year),
                              'month': date_series.apply(lambda x: x.month),
@@ -1133,6 +1158,8 @@ class DegreeDays(ClimateTimeSeriesBase):
         # add ymd information
         temp = pd.concat([temp, self.get_ymd(temp)], axis=1)
 
+        # Remove data where daily data count is below threshold
+        # But keep days that were averaged from max and min temperatures (count = -1)
         temp.loc[(self.AT.daily_data['count'] >= 0) & (self.AT.daily_data['count'] < self.daily_data_threshold), 'AT'] = np.nan
 
         # flag any incomplete days, so they will not be included in the statistics for annual averages
@@ -1152,9 +1179,10 @@ class DegreeDays(ClimateTimeSeriesBase):
 
         # stack up results
         dd = pd.concat([tdd, fdd, dsum], axis=1)
+        dd = dd.sort_index(ascending=True)
 
         # Reindex to get a full timeseries without gaps
-        new_index = np.arange(dd.index[0] - 1, dd.index[-1] + 2, 1, dtype=float)
+        new_index = np.arange(dd.index.min() - 1, dd.index.max() + 2, 1, dtype=float)
         dd = dd.reindex(index=new_index)
 
         dd['skip_flag'] = False
@@ -2237,26 +2265,6 @@ class DMITypeLongMonthly(ClimateDataSetBase):
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 class NESDISType(ClimateDataSetBase):
     dstype = 'NESDIS'
     description = 'Data type as retreived from NESDIS online database at https://www.ncdc.noaa.gov/cdo-web/'
@@ -2266,15 +2274,13 @@ class NESDISType(ClimateDataSetBase):
 
     def read_data(self, file, encoding=None):
         # Read time series and process date columns
-        raw_data = pd.read_csv(file, sep=',',
-                               na_values=['', ' ', '\t', 'NaN', 'T', '99999', '9999.9', '999.99'],
-                               encoding=encoding)
+        raw_data = pd.read_csv(file, sep=';',
+                         na_values=['', ' ', '\t', 'NaN', 'T', '99999', '9999.9', '999.99'],
+                         encoding=encoding)
 
-        # Convert dates, assume 12 o'clock noon
-        dates = pd.to_datetime(raw_data['DATE'], format='%Y-%m-%d')
+        dates = pd.to_datetime(raw_data['year'] * 1000000 + raw_data['month'] * 10000 + raw_data['day'] * 100, format='%Y%m%d%H')
 
         # Index the dataframe based on datetimes
-        # dates = pd.to_datetime(dates)
         raw_data.index = pd.DatetimeIndex(dates)
 
         raw_data['weekday'] = raw_data.index.weekday  # added to be used for calculating statistics
@@ -2287,9 +2293,21 @@ class NESDISType(ClimateDataSetBase):
 
         raw_data['weekday'] = raw_data.index.weekday  # added to be used for calculating statistics
 
+        # convert Farenheit to Celcius
+        for field in ['Tmax', 'Tmin', 'Tobs', 'Tmean']:
+            raw_data[field] = raw_data[field].apply(farenheit2celsius)
+
+        # convert inches to mm
+        for field in ['Prcp']:
+            raw_data[field] = raw_data[field].apply(inches2mm)
+
         self.raw_data = raw_data
 
-        raise NotImplementedError('Instantiation of ClimateSeries classes is not implemented for NESDIS data yet.')
+        # Now assign datasets where data is present
+        self.datasets['AT'] = AirTemp(ATmin=raw_data['Tmin'],
+                                      ATmax=raw_data['Tmax'])
+       
+        self.datasets['PRE'] = Precipitation(PRE=raw_data['Prcp'])
 
         #self.datasets['AT'] = AirTemp(at_series=converted['ttt'])
         #self.datasets['RH'] = RelativeHumidity(rh=converted['rh'])
@@ -2297,33 +2315,33 @@ class NESDISType(ClimateDataSetBase):
         #self.datasets['PRE'] = Precipitation(precip=converted['pppp'])
         #self.datasets['SD'] = SnowDepth(precip=converted['sss'])
 
-    def is_valid(self):
-        if self.raw_data['TAVG'].count() == 0:
-            return False
-        else:
-            return True
+    # def is_valid(self):
+    #     if self.raw_data['TAVG'].count() == 0:
+    #         return False
+    #     else:
+    #         return True
 
-    def calc_daily_averages(self):
+    # def calc_daily_averages(self):
 
-        # METHOD IS KEPT HERE FOR DOCUMENTATION PURPOSES.
-        # some old data sets have only max and min temperatures measured
-        # these are currently not handled.
-        # But this is the way to handle them when needed.
-        #
-        # We need to implement a way to use this information in the AirTemp
-        # class.
+    #     # METHOD IS KEPT HERE FOR DOCUMENTATION PURPOSES.
+    #     # some old data sets have only max and min temperatures measured
+    #     # these are currently not handled.
+    #     # But this is the way to handle them when needed.
+    #     #
+    #     # We need to implement a way to use this information in the AirTemp
+    #     # class.
 
-        AT_mean_values = np.where(self.raw_data['TAVG'].isna(),
-                                  (self.raw_data['TMAX'] + self.raw_data['TMIN']) / 2,
-                                  self.raw_data['TAVG'])
-        AT_mean_count = 24   # TODO: Should this be set to 2 instead of 24?
+    #     AT_mean_values = np.where(self.raw_data['TAVG'].isna(),
+    #                               (self.raw_data['TMAX'] + self.raw_data['TMIN']) / 2,
+    #                               self.raw_data['TAVG'])
+    #     AT_mean_count = 24   # TODO: Should this be set to 2 instead of 24?
 
-        # Create new dataframe with daily averages
-        AT_mean = pd.DataFrame(AT_mean_values, index=np.unique(self.raw_data.index.date))
-        AT_mean.columns = ['AT']
-        AT_mean['count'] = AT_mean_count
+    #     # Create new dataframe with daily averages
+    #     AT_mean = pd.DataFrame(AT_mean_values, index=np.unique(self.raw_data.index.date))
+    #     AT_mean.columns = ['AT']
+    #     AT_mean['count'] = AT_mean_count
 
-        self.AT_mean = AT_mean
+    #     self.AT_mean = AT_mean
 
 
 class CustomType1(ClimateDataSetBase):
@@ -2333,7 +2351,7 @@ class CustomType1(ClimateDataSetBase):
     def __init__(self, file, **kwargs):
         super().__init__(file, **kwargs)
 
-    def read_data(self):
+    def read_data(self, file, encoding=None):
         # Read time series and process date columns
         raw_data = pd.read_csv(file, sep=';', dtype={'YRMODAHRMN': str, 'TEMP': float},
                                na_values=['', ' ', '\t', 'NaN', 'T', '99999', '9999.9', '999.99', '****'], encoding=encoding)
@@ -2349,22 +2367,17 @@ class CustomType1(ClimateDataSetBase):
 
         # adjust column names to be like DMI column names
         raw_data.rename(columns={'TEMP': 'ttt'}, inplace=True)
-
-        # convert Farenheit to Celcius
         raw_data['ttt'] = raw_data['ttt'].apply(farenheit2celsius)
 
-        for key in ['txtxtx', 'tntntn', 'Tmean']: raw_data[key] = np.nan
-        #raw_data['weekday'] = raw_data.index.weekday  # added to be used for calculating statistics
 
         self.raw_data = raw_data
 
-        raise NotImplementedError('Instantiation of ClimateSeries classes is not implemented for NESDIS data yet.')
-
-        self.datasets['AT'] = AirTemp(at_series=raw_data['ttt'])
+        self.datasets['AT'] = AirTemp(AT=raw_data['ttt'])
         #self.datasets['RH'] = RelativeHumidity(rh=converted['rh'])
         #self.datasets['WIND'] = Wind(windspeed=converted['ff'], winddir=converted('ddd'))
         #self.datasets['PRE'] = Precipitation(precip=converted['pppp'])
         #self.datasets['SD'] = SnowDepth(precip=converted['sss'])
+
 
 
 class DMIUnified(ClimateDataSetBase):
